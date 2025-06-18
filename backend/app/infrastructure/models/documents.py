@@ -42,3 +42,22 @@ class SessionDocument(Document):
         indexes = [
             "session_id",
         ]
+
+class AttachmentDocument(Document):
+    """model for Attachment"""
+    attachment_id: str
+    session_id: str
+    filename: str
+    content_type: str
+    file_size: int
+    storage_type:str
+    storage_url: str
+    created_at: datetime = datetime.now(timezone.utc)
+    updated_at: datetime = datetime.now(timezone.utc)
+
+    class Settings:
+        name = "attachments"
+        indexes = [
+            "attachment_id",
+            "task_id"
+        ]

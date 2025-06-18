@@ -4,6 +4,9 @@ from contextlib import asynccontextmanager
 import logging
 import asyncio
 
+from app.application.services.attachment_service import AttachmentService
+from app.infrastructure.repositories.mongo_attachment_repository import AttachmentRepository
+from app.infrastructure.storage.file_storage import StorageFactory
 from app.interfaces.api.routes import router
 from app.application.services.agent_service import AgentService
 from app.infrastructure.config import get_settings
@@ -18,7 +21,7 @@ from app.infrastructure.repositories.mongo_agent_repository import MongoAgentRep
 from app.infrastructure.repositories.mongo_session_repository import MongoSessionRepository
 from app.infrastructure.external.task.redis_task import RedisStreamTask
 from app.interfaces.api.routes import get_agent_service
-from app.infrastructure.models.documents import AgentDocument, SessionDocument
+from app.infrastructure.models.documents import AgentDocument, SessionDocument, AttachmentDocument
 from app.infrastructure.utils.llm_json_parser import LLMJsonParser
 from beanie import init_beanie
 
@@ -55,6 +58,12 @@ def create_agent_service() -> AgentService:
 # Create agent service instance
 agent_service = create_agent_service()
 
+def get_attachment_service() -> AttachmentService:
+    storage_factory = StorageFactory()
+    attachment_repository = AttachmentRepository()
+    return AttachmentService(storage_factory, attachment_repository)
+
+
 async def shutdown() -> None:
     """Cleanup function that will be called when the application is shutting down"""
     logger.info("Graceful shutdown...")
@@ -83,7 +92,7 @@ async def lifespan(app: FastAPI):
     # Initialize Beanie
     await init_beanie(
         database=get_mongodb().client[settings.mongodb_database],
-        document_models=[AgentDocument, SessionDocument]
+        document_models=[AgentDocument, SessionDocument,AttachmentDocument]
     )
     logger.info("Successfully initialized Beanie")
     

@@ -16,3 +16,5 @@ pymongo>=4.6.1
 beanie>=1.25.0
 async-lru>=2.0.0
 redis>=5.0.1
+boto3>=1.26.0
+python-multipart>=0.0.6

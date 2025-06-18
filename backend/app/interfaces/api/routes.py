@@ -1,16 +1,21 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Request
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, UploadFile, File, Body
 from sse_starlette.sse import EventSourceResponse
-from typing import AsyncGenerator, Dict, Any, List
+from typing import AsyncGenerator, Optional
 from sse_starlette.event import ServerSentEvent
 from datetime import datetime
 import asyncio
 import websockets
 import logging
-from app.application.services.agent_service import AgentService
-from app.interfaces.schemas.request import ChatRequest, FileViewRequest, ShellViewRequest
-from app.interfaces.schemas.response import APIResponse, CreateSessionResponse, GetSessionResponse, ShellViewResponse, FileViewResponse, ListSessionItem, ListSessionResponse
-from app.interfaces.schemas.event import SSEEventFactory
 
+from app.application.services.agent_service import AgentService
+from app.application.services.attachment_service import AttachmentService
+from app.infrastructure.repositories.mongo_attachment_repository import AttachmentRepository
+from app.infrastructure.storage.file_storage import StorageFactory
+from app.interfaces.schemas.request import ChatRequest, FileViewRequest, ShellViewRequest, CreateSessionRequest
+from app.interfaces.schemas.response import APIResponse, CreateSessionResponse, GetSessionResponse, ListSessionItem, \
+    ListSessionResponse, AttachmentUploadResponse, AttachmentDownloadResponse, \
+    SessionAttachmentsResponse
+from app.interfaces.schemas.event import SSEEventFactory
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -23,21 +28,32 @@ def get_agent_service() -> AgentService:
     # Placeholder for dependency injection
     return None
 
+
+def get_attachment_service() -> AttachmentService:
+    storage_factory = StorageFactory()
+    attachment_repository = AttachmentRepository()
+    return AttachmentService(storage_factory, attachment_repository)
+
+
 @router.put("/sessions", response_model=APIResponse[CreateSessionResponse])
 async def create_session(
-    agent_service: AgentService = Depends(get_agent_service)
+        request: Optional[CreateSessionRequest] = None,
+        agent_service: AgentService = Depends(get_agent_service),
+        attachment_service: AttachmentService = Depends(get_attachment_service)
 ) -> APIResponse[CreateSessionResponse]:
-    session = await agent_service.create_session()
+    attachments = request.attachments if request is not None else None
+    session = await agent_service.create_session(attachments, attachment_service)
     return APIResponse.success(
         CreateSessionResponse(
             session_id=session.id,
         )
     )
 
+
 @router.get("/sessions/{session_id}", response_model=APIResponse[GetSessionResponse])
 async def get_session(
-    session_id: str,
-    agent_service: AgentService = Depends(get_agent_service)
+        session_id: str,
+        agent_service: AgentService = Depends(get_agent_service)
 ) -> APIResponse[GetSessionResponse]:
     session = await agent_service.get_session(session_id)
     return APIResponse.success(GetSessionResponse(
@@ -46,18 +62,21 @@ async def get_session(
         events=SSEEventFactory.from_events(session.events)
     ))
 
+
 @router.delete("/sessions/{session_id}", response_model=APIResponse[None])
 async def delete_session(
-    session_id: str,
-    agent_service: AgentService = Depends(get_agent_service)
+        session_id: str,
+        agent_service: AgentService = Depends(get_agent_service),
+        attachment_service: AttachmentService = Depends(get_attachment_service)
 ) -> APIResponse[None]:
-    await agent_service.delete_session(session_id)
+    await agent_service.delete_session(session_id, attachment_service)
     return APIResponse.success()
+
 
 @router.post("/sessions/{session_id}/stop", response_model=APIResponse[None])
 async def stop_session(
-    session_id: str,
-    agent_service: AgentService = Depends(get_agent_service)
+        session_id: str,
+        agent_service: AgentService = Depends(get_agent_service)
 ) -> APIResponse[None]:
     await agent_service.stop_session(session_id)
     return APIResponse.success()
@@ -65,7 +84,7 @@ async def stop_session(
 
 @router.get("/sessions", response_model=APIResponse[ListSessionResponse])
 async def get_all_sessions(
-    agent_service: AgentService = Depends(get_agent_service)
+        agent_service: AgentService = Depends(get_agent_service)
 ) -> APIResponse[ListSessionResponse]:
     sessions = await agent_service.get_all_sessions()
     session_items = [
@@ -80,9 +99,10 @@ async def get_all_sessions(
     ]
     return APIResponse.success(ListSessionResponse(sessions=session_items))
 
+
 @router.post("/sessions")
 async def get_all_sessions(
-    agent_service: AgentService = Depends(get_agent_service)
+        agent_service: AgentService = Depends(get_agent_service)
 ) -> EventSourceResponse:
     async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
         while True:
@@ -102,20 +122,22 @@ async def get_all_sessions(
                 data=ListSessionResponse(sessions=session_items).model_dump_json()
             )
             await asyncio.sleep(SESSION_POLL_INTERVAL)
+
     return EventSourceResponse(event_generator())
+
 
 @router.post("/sessions/{session_id}/chat")
 async def chat(
-    session_id: str,
-    request: ChatRequest,
-    agent_service: AgentService = Depends(get_agent_service)
+        session_id: str,
+        request: ChatRequest,
+        agent_service: AgentService = Depends(get_agent_service)
 ) -> EventSourceResponse:
     async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
         async for event in agent_service.chat(
-            session_id=session_id,
-            message=request.message,
-            timestamp=datetime.fromtimestamp(request.timestamp) if request.timestamp else None,
-            event_id=request.event_id
+                session_id=session_id,
+                message=request.message,
+                timestamp=datetime.fromtimestamp(request.timestamp) if request.timestamp else None,
+                event_id=request.event_id
         ):
             logger.debug(f"Received event from chat: {event}")
             sse_event = SSEEventFactory.from_event(event)
@@ -126,14 +148,14 @@ async def chat(
                     data=sse_event.data.model_dump_json() if sse_event.data else None
                 )
 
-    return EventSourceResponse(event_generator()) 
+    return EventSourceResponse(event_generator())
 
 
 @router.post("/sessions/{session_id}/shell")
 async def view_shell(
-    session_id: str,
-    request: ShellViewRequest,
-    agent_service: AgentService = Depends(get_agent_service)
+        session_id: str,
+        request: ShellViewRequest,
+        agent_service: AgentService = Depends(get_agent_service)
 ) -> EventSourceResponse:
     """View shell session output
     
@@ -146,6 +168,7 @@ async def view_shell(
     Returns:
         EventSourceResponse with shell output updates
     """
+
     async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
         while True:
             result = await agent_service.shell_view(session_id, request.session_id)
@@ -154,14 +177,15 @@ async def view_shell(
                 data=result.model_dump_json()
             )
             await asyncio.sleep(TOOL_POLL_INTERVAL)
-    return EventSourceResponse(event_generator()) 
+
+    return EventSourceResponse(event_generator())
 
 
 @router.post("/sessions/{session_id}/file")
 async def view_file(
-    session_id: str,
-    request: FileViewRequest,
-    agent_service: AgentService = Depends(get_agent_service)
+        session_id: str,
+        request: FileViewRequest,
+        agent_service: AgentService = Depends(get_agent_service)
 ) -> EventSourceResponse:
     """View file content
     
@@ -174,6 +198,7 @@ async def view_file(
     Returns:
         EventSourceResponse with file content updates
     """
+
     async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
         while True:
             result = await agent_service.file_view(session_id, request.file)
@@ -182,14 +207,15 @@ async def view_file(
                 data=result.model_dump_json()
             )
             await asyncio.sleep(TOOL_POLL_INTERVAL)
-    return EventSourceResponse(event_generator()) 
+
+    return EventSourceResponse(event_generator())
 
 
 @router.websocket("/sessions/{session_id}/vnc")
 async def vnc_websocket(
-    websocket: WebSocket,
-    session_id: str,
-    agent_service: AgentService = Depends(get_agent_service)
+        websocket: WebSocket,
+        session_id: str,
+        agent_service: AgentService = Depends(get_agent_service)
 ) -> None:
     """VNC WebSocket endpoint (binary mode)
     
@@ -199,19 +225,20 @@ async def vnc_websocket(
         websocket: WebSocket connection
         session_id: Session ID
     """
-    
+
     await websocket.accept(subprotocol="binary")
-    
+
     try:
-    
+
         # Get sandbox environment address
         sandbox_ws_url = await agent_service.get_vnc_url(session_id)
 
         logger.info(f"Connecting to VNC WebSocket at {sandbox_ws_url}")
-    
+
         # Connect to sandbox WebSocket
         async with websockets.connect(sandbox_ws_url) as sandbox_ws:
             logger.info(f"Connected to VNC WebSocket at {sandbox_ws_url}")
+
             # Create two tasks to forward data bidirectionally
             async def forward_to_sandbox():
                 try:
@@ -223,7 +250,7 @@ async def vnc_websocket(
                     pass
                 except Exception as e:
                     logger.error(f"Error forwarding data to sandbox: {e}")
-            
+
             async def forward_from_sandbox():
                 try:
                     while True:
@@ -234,11 +261,11 @@ async def vnc_websocket(
                     pass
                 except Exception as e:
                     logger.error(f"Error forwarding data from sandbox: {e}")
-            
+
             # Run two forwarding tasks concurrently
             forward_task1 = asyncio.create_task(forward_to_sandbox())
             forward_task2 = asyncio.create_task(forward_from_sandbox())
-            
+
             # Wait for either task to complete (meaning connection has closed)
             done, pending = await asyncio.wait(
                 [forward_task1, forward_task2],
@@ -246,14 +273,57 @@ async def vnc_websocket(
             )
 
             logger.info("WebSocket connection closed")
-            
+
             # Cancel pending tasks
             for task in pending:
                 task.cancel()
-    
+
     except ConnectionError as e:
         logger.error(f"Unable to connect to sandbox environment: {str(e)}")
         await websocket.close(code=1011, reason=f"Unable to connect to sandbox environment: {str(e)}")
     except Exception as e:
         logger.error(f"WebSocket error: {str(e)}")
         await websocket.close(code=1011, reason=f"WebSocket error: {str(e)}")
+
+
+@router.post("/attachments/upload", response_model=APIResponse[AttachmentUploadResponse])
+async def upload_attachment(
+        file: UploadFile = File(...),
+        attachment_service: AttachmentService = Depends(get_attachment_service)
+) -> APIResponse[AttachmentUploadResponse]:
+    result = await attachment_service.upload_attachment(file)
+    return APIResponse.success(result)
+
+
+@router.get("/attachments/download/{storage_url}", response_model=APIResponse[AttachmentDownloadResponse])
+async def download_attachment(
+        storage_url: str,
+        attachment_service: AttachmentService = Depends(get_attachment_service)
+) -> APIResponse[AttachmentDownloadResponse]:
+    result = await attachment_service.download_attachment(storage_url)
+    return APIResponse.success(result)
+
+
+@router.get("/sessions/{session_id}/attachments", response_model=APIResponse[SessionAttachmentsResponse])
+async def get_session_attachments(
+        session_id: str,
+        attachment_service: AttachmentService = Depends(get_attachment_service)
+) -> APIResponse[SessionAttachmentsResponse]:
+    """获取会话的所有附件"""
+    attachments = await attachment_service.get_session_attachments(session_id)
+    attachment_list = [
+        {
+            "attachment_id": att.attachment_id,
+            "filename": att.filename,
+            "content_type": att.content_type,
+            "file_size": att.file_size,
+            "storage_type": att.storage_type,
+            "storage_url": att.storage_url,
+            "created_at": int(att.created_at.timestamp())
+        }
+        for att in attachments
+    ]
+    return APIResponse.success(SessionAttachmentsResponse(
+        session_id=session_id,
+        attachments=attachment_list
+    ))
