@@ -42,3 +42,15 @@ class FileFindRequest(BaseModel):
     """File find request"""
     path: str = Field(..., description="Directory path to search")
     glob: str = Field(..., description="Filename pattern (glob syntax)")
+
+
+class FileUploadRequest(BaseModel):
+    """File upload request"""
+    target_dir: str = Field(..., description="Target directory path")
+    sudo: Optional[bool] = Field(False, description="Whether to use sudo privileges")
+
+
+class FileDownloadRequest(BaseModel):
+    """File download request"""
+    sandbox_path: str = Field(..., description="Source file path in sandbox")
+    sudo: Optional[bool] = Field(False, description="Whether to use sudo privileges")
