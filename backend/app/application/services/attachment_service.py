@@ -20,14 +20,8 @@ class AttachmentService:
         self.repository = attachment_repository
 
     async def upload_attachment(self, file: UploadFile) -> AttachmentUploadResponse:
-        """上传附件（不保存到数据库，只存储文件）"""
-        # 获取存储实例
         storage = await self.storage_factory.create_storage()
-
-        # 上传到存储
         upload_result = await storage.upload_file(file)
-
-        # 返回上传结果
         return AttachmentUploadResponse(**upload_result)
 
     async def download_attachment(self, storage_url: str) -> AttachmentDownloadResponse:

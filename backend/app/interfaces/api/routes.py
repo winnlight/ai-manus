@@ -1,6 +1,6 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, UploadFile, File, Body
 from sse_starlette.sse import EventSourceResponse
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, io
 from sse_starlette.event import ServerSentEvent
 from datetime import datetime
 import asyncio
@@ -13,9 +13,10 @@ from app.infrastructure.repositories.mongo_attachment_repository import Attachme
 from app.infrastructure.storage.file_storage import StorageFactory
 from app.interfaces.schemas.request import ChatRequest, FileViewRequest, ShellViewRequest, CreateSessionRequest
 from app.interfaces.schemas.response import APIResponse, CreateSessionResponse, GetSessionResponse, ListSessionItem, \
-    ListSessionResponse, AttachmentUploadResponse, AttachmentDownloadResponse, \
+    ListSessionResponse, AttachmentUploadResponse, \
     SessionAttachmentsResponse
 from app.interfaces.schemas.event import SSEEventFactory
+from starlette.responses import StreamingResponse
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -295,13 +296,34 @@ async def upload_attachment(
     return APIResponse.success(result)
 
 
-@router.get("/attachments/download/{storage_url}", response_model=APIResponse[AttachmentDownloadResponse])
+@router.get("/attachments/download/{storage_url}")
 async def download_attachment(
         storage_url: str,
         attachment_service: AttachmentService = Depends(get_attachment_service)
-) -> APIResponse[AttachmentDownloadResponse]:
-    result = await attachment_service.download_attachment(storage_url)
-    return APIResponse.success(result)
+) -> StreamingResponse:
+    try:
+        result = await attachment_service.download_attachment(storage_url)
+
+        def file_generator():
+            chunk_size = 8192  # 8KB chunks
+            for i in range(0, len(result.content), chunk_size):
+                yield result.content[i:i + chunk_size]
+
+        headers = {
+            "Content-Disposition": f"attachment; filename=\"{result.filename}\"",
+            "Content-Type": result.content_type,
+            "Content-Length": str(len(result.content))
+        }
+
+        return StreamingResponse(
+            file_generator(),
+            media_type=result.content_type,
+            headers=headers
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to download attachment: {str(e)}")
+        return APIResponse.error(f"Failed to download attachment: {str(e)}")
 
 
 @router.get("/sessions/{session_id}/attachments", response_model=APIResponse[SessionAttachmentsResponse])
@@ -309,7 +331,6 @@ async def get_session_attachments(
         session_id: str,
         attachment_service: AttachmentService = Depends(get_attachment_service)
 ) -> APIResponse[SessionAttachmentsResponse]:
-    """获取会话的所有附件"""
     attachments = await attachment_service.get_session_attachments(session_id)
     attachment_list = [
         {
